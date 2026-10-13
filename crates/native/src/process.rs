@@ -81,12 +81,15 @@ pub fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, St
     Err(if reason.is_empty() { format!("{program} failed ({status})") } else { reason.to_string() })
 }
 
-/// Reads a child's pipe to the end (at most 8 MB) on its own thread.
+/// Captures at most 8 MB of a child's pipe and drains the rest on its own thread.
 fn read_all<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
         let mut out = Vec::new();
-        if let Some(pipe) = pipe {
-            let _ = std::io::Read::read_to_end(&mut std::io::Read::take(pipe, 8 << 20), &mut out);
+        if let Some(mut pipe) = pipe {
+            let _ = std::io::Read::read_to_end(&mut std::io::Read::take(&mut pipe, 8 << 20), &mut out);
+            // Keep reading without retaining more output: closing a full pipe early can make a
+            // successful helper fail with a broken pipe (SIGPIPE on Unix).
+            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
         }
         out
     })
@@ -320,6 +323,30 @@ mod run_tests {
         let (program, args) = shell(if cfg!(windows) { "echo no such image 1>&2 & exit /b 3" } else { "echo no such image >&2; exit 3" });
         assert_eq!(run(program, &args, Duration::from_secs(30)), Err("no such image".into()));
         assert_eq!(capture(program, &args, Duration::from_secs(30)), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_helpers_can_write_past_the_stdout_capture_limit() {
+        let out = run("/bin/sh", &["-c", "head -c 9437184 /dev/zero"], Duration::from_secs(10)).unwrap();
+        assert_eq!(out.len(), 8 << 20);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_helpers_can_write_past_the_stderr_capture_limit() {
+        let out = run("/bin/sh", &["-c", "head -c 9437184 /dev/zero >&2"], Duration::from_secs(10));
+        assert!(out.is_ok(), "the helper should finish without a broken pipe");
+        assert!(out.unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_helper_that_keeps_writing_still_times_out() {
+        let start = Instant::now();
+        let err = run("yes", &[], Duration::from_millis(100)).unwrap_err();
+        assert!(err.contains("didn't finish within"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
