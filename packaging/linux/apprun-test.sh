@@ -139,6 +139,34 @@ sed 's/^Exec=/Exec=env DESKTOPINTEGRATION=1 /' "$TMP/generated-entry" >"$DESKTOP
 "$APPDIR/AppRun" >/dev/null || fail "launch with custom Exec failed"
 grep -Fq 'Exec=env DESKTOPINTEGRATION=1' "$DESKTOP" || fail "custom launch environment overwritten"
 
+# 12a. A plain quoted absolute wrapper is a customization, too.
+wrapper="$TMP/custom launcher wrapper"
+printf '#!/bin/sh\nexit 0\n' >"$wrapper"
+sed "s|^Exec=.*|Exec=\"$wrapper\"|" "$TMP/generated-entry" >"$DESKTOP"
+cp "$DESKTOP" "$TMP/custom-wrapper-entry"
+"$APPDIR/AppRun" >/dev/null || fail "launch with quoted wrapper failed"
+cmp -s "$DESKTOP" "$TMP/custom-wrapper-entry" || fail "quoted absolute wrapper overwritten"
+
+# 12b. Unmarked legacy entries cannot establish ownership, even with a plain Exec.
+legacy="$TMP/legacy.AppImage"
+: >"$legacy"
+sed -e '/^X-ArtCraft-Launcher-Generated-Exec=/d' -e "s|^Exec=.*|Exec=\"$legacy\"|" "$TMP/generated-entry" >"$DESKTOP"
+cp "$DESKTOP" "$TMP/legacy-entry"
+"$APPDIR/AppRun" >/dev/null || fail "launch with legacy entry failed"
+cmp -s "$DESKTOP" "$TMP/legacy-entry" || fail "ambiguous legacy entry overwritten"
+
+# 12c. Duplicate executable or ownership keys are ambiguous and stay untouched.
+for key in Exec X-ArtCraft-Launcher-Generated-Exec; do
+  cp "$TMP/generated-entry" "$DESKTOP"
+  grep "^$key=" "$TMP/generated-entry" >>"$DESKTOP"
+  cp "$DESKTOP" "$TMP/duplicate-entry"
+  "$APPDIR/AppRun" >/dev/null || fail "launch with duplicate $key failed"
+  cmp -s "$DESKTOP" "$TMP/duplicate-entry" || fail "duplicate $key entry overwritten"
+done
+
+# The uncustomized entry refreshed after the move keeps a matching ownership marker.
+grep -Fxq "X-ArtCraft-Launcher-Generated-Exec=\"$(readlink -f "$APPIMAGE")\"" "$TMP/generated-entry" || fail "generated executable marker missing or stale"
+
 # 13. Refresh a changed icon, and tolerate a cache updater that fails.
 printf '#!/bin/sh\nexit 1\n' >"$TMP/tools/gtk-update-icon-cache"
 icon="16x16/apps/$APP_ID.png"
