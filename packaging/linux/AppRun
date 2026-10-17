@@ -45,7 +45,8 @@ integrate() {
   mkdir -p "$apps" 2>/dev/null || return 0
   tmp="$apps/.$DESK_ID.tmp.$$"
   esc="$(printf '%s' "$appimage" | sed 's/[\\&|]/\\&/g')"
-  if sed -e "s|^Exec=.*|Exec=\"$esc\"|" -e '/^TryExec=/d' "$src_desktop" 2>/dev/null >"$tmp"; then
+  if sed -e "s|^Exec=.*|Exec=\"$esc\"|" -e '/^TryExec=/d' "$src_desktop" 2>/dev/null >"$tmp" &&
+    printf '%s\n' "X-ArtCraft-Launcher-Generated-Exec=\"$appimage\"" >>"$tmp"; then
     if cmp -s "$tmp" "$apps/$DESK_ID.desktop"; then
       rm -f "$tmp"
     elif [ ! -e "$apps/$DESK_ID.desktop" ] && [ ! -L "$apps/$DESK_ID.desktop" ] || own_entry "$apps/$DESK_ID.desktop"; then
@@ -84,14 +85,18 @@ integrate() {
   }
 }
 
-# Only an unchanged entry generated from our template may be refreshed after a move.
-# Removing Exec for the comparison still preserves TryExec and every other extra line:
-# entries created by a manager, or customized by a user, are left alone.
+# Refresh only an unchanged entry whose Exec still matches the executable we wrote.
+# Unmarked legacy entries and customized or ambiguous executable fields are preserved.
 own_entry() {
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
+  [ "$(grep -c '^Exec=' "$1")" = 1 ] || return 1
+  [ "$(grep -c '^X-ArtCraft-Launcher-Generated-Exec=' "$1")" = 1 ] || return 1
   grep -Eq '^Exec="/[^"`$\\%]+"$' "$1" || return 1
+  existing_exec="$(sed -n 's/^Exec=//p' "$1")" || return 1
+  generated_exec="$(sed -n 's/^X-ArtCraft-Launcher-Generated-Exec=//p' "$1")" || return 1
+  [ "$existing_exec" = "$generated_exec" ] || return 1
   expected_body="$(sed -e '/^Exec=/d' -e '/^TryExec=/d' "$src_desktop")" || return 1
-  existing_body="$(sed '/^Exec=/d' "$1")" || return 1
+  existing_body="$(sed -e '/^Exec=/d' -e '/^X-ArtCraft-Launcher-Generated-Exec=/d' "$1")" || return 1
   [ "$expected_body" = "$existing_body" ]
 }
 
