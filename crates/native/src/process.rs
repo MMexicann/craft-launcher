@@ -72,6 +72,14 @@ pub fn run(program: &str, args: &[&str], timeout: Duration) -> Result<String, St
             }
         }
     };
+    // A descendant may retain a pipe after the direct child exits. Keep reader completion
+    // under the same deadline; on timeout the readers detach, as in the child timeout path.
+    while !stdout.is_finished() || !stderr.is_finished() {
+        if start.elapsed() >= timeout {
+            return Err(format!("{program} didn't finish within {} seconds", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
     let text = |pipe: std::thread::JoinHandle<Vec<u8>>| String::from_utf8_lossy(&pipe.join().unwrap_or_default()).into_owned();
     let (out, err) = (text(stdout), text(stderr));
     if status.success() {
@@ -380,5 +388,86 @@ mod explorer_tests {
     fn explorer_select_uses_backslashes() {
         let arg = explorer_select_arg(Path::new("C:/Users/A B/AppData/Local/ArtCraft Launcher/apps/photocraft.exe"));
         assert_eq!(arg.unwrap(), r#"/select,"C:\Users\A B\AppData\Local\ArtCraft Launcher\apps\photocraft.exe""#);
+    }
+}
+
+#[cfg(test)]
+mod inherited_pipe_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn fixture_args(name: &str, marker: &str) -> Vec<String> {
+        let (_, module) = module_path!().split_once("::").unwrap();
+        // libtest accepts arbitrary skip filters; this one carries our private fixture path.
+        vec!["--ignored".into(), "--exact".into(), format!("{module}::{name}"), "--nocapture".into(), "--skip".into(), marker.into()]
+    }
+
+    fn fixture_dir() -> std::path::PathBuf {
+        let args: Vec<String> = std::env::args().collect();
+        std::path::PathBuf::from(&args[args.iter().position(|arg| arg == "--skip").unwrap() + 1])
+    }
+
+    #[test]
+    #[ignore = "self-spawned subprocess fixture"]
+    fn pipe_holder() {
+        let dir = fixture_dir();
+        let buffer = [b'x'; 64 << 10];
+        // Both streams exceed the capture cap before the direct child exits.
+        for _ in 0..144 {
+            std::io::stdout().write_all(&buffer).unwrap();
+            std::io::stderr().write_all(&buffer).unwrap();
+        }
+        std::fs::write(dir.join("ready"), []).unwrap();
+        let start = Instant::now();
+        while !dir.join("stop").exists() && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(dir.join("done"), []).unwrap();
+    }
+
+    #[test]
+    #[ignore = "self-spawned subprocess fixture"]
+    fn pipe_parent() {
+        let dir = fixture_dir();
+        let descendant = command(std::env::current_exe().unwrap()).args(fixture_args("pipe_holder", dir.to_str().unwrap())).spawn().unwrap();
+        let start = Instant::now();
+        while !dir.join("ready").exists() && start.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(dir.join("ready").exists(), "descendant did not fill both captured pipes");
+        std::fs::write(dir.join("parent-returning"), []).unwrap();
+        // Dropping Child leaves the finite fixture running with inherited stdout/stderr.
+        drop(descendant);
+    }
+
+    struct StopHolder(tempfile::TempDir);
+
+    impl Drop for StopHolder {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.path().join("stop"), []);
+            let start = Instant::now();
+            while !self.0.path().join("done").exists() && start.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn exited_helper_does_not_wait_past_deadline_for_inherited_pipes() {
+        let holder = StopHolder(tempfile::tempdir().unwrap());
+        let exe = std::env::current_exe().unwrap();
+        let args = fixture_args("pipe_parent", holder.0.path().to_str().unwrap());
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let start = Instant::now();
+        let result = run(exe.to_str().unwrap(), &args, Duration::from_secs(1));
+        let elapsed = start.elapsed();
+        assert!(holder.0.path().join("parent-returning").exists(), "direct child did not exit its fixture");
+        assert!(
+            matches!(&result, Err(error) if error.contains("didn't finish within")),
+            "expected a pipe deadline error; helper returned success: {}, elapsed: {elapsed:?}",
+            result.is_ok()
+        );
+        assert!(elapsed < Duration::from_secs(2), "capture exceeded its caller deadline: {elapsed:?}");
+        // The guard stops the finite descendant and waits for its completion marker on failures too.
     }
 }
