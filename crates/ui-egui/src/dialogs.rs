@@ -98,7 +98,7 @@ impl LauncherUi {
             if release.notes.is_empty() {
                 ui.label(tl!("These notes weren't fetched (GitHub's request limit was reached). They're on the release page."));
             } else {
-                crate::notes::show(ui, &release.notes);
+                crate::notes::show_scaled(ui, &release.notes, self.notes_zoom);
             }
         });
         ui.add_space(12.0);
@@ -421,7 +421,7 @@ impl LauncherUi {
                     if !is_flatpak && !is_appimage {
                         ui.selectable_value(&mut choice, None, tl!("System package (recommended)"));
                     }
-                    for k in [PackageKind::Deb, PackageKind::Rpm, PackageKind::Flatpak, PackageKind::AppImage] {
+                    for k in [PackageKind::Deb, PackageKind::Rpm, PackageKind::ArchPkg, PackageKind::Flatpak, PackageKind::AppImage] {
                         ui.selectable_value(&mut choice, Some(k), crate::i18n::t(k.label()));
                     }
                     // The tarball is unpacked and run inside the launcher's own sandbox, so it
@@ -457,9 +457,9 @@ impl LauncherUi {
         ui.label(RichText::new(tl!("Questions, ideas and news from the ArtCraft team")).color(t.muted));
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            use artcraft_launcher_core::catalog::{DISCORD_URL, GITHUB_URL, WEBSITE_URL};
-            if widgets::button(ui, tl!("Join the Discord"), Kind::Primary, 0.0).on_hover_text(DISCORD_URL).clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(DISCORD_URL));
+            use artcraft_launcher_core::catalog::{GITHUB_URL, WEBSITE_URL};
+            if widgets::button(ui, tl!("Join the Discord"), Kind::Primary, 0.0).on_hover_text(self.discord_url).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(self.discord_url));
             }
             if widgets::button(ui, tl!("Website"), Kind::Secondary, 0.0).on_hover_text(WEBSITE_URL).clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(WEBSITE_URL));
