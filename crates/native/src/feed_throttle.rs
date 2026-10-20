@@ -92,7 +92,7 @@ impl FeedThrottle {
         let mut saved = std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<Saved>(&b).ok()).unwrap_or_default();
         // Allow the longest Retry-After plus throttle jitter; anything further suggests a
         // broken file or a clock that jumped back.
-        if saved.not_before > now + MAX_RETRY_AFTER * 3 / 2 {
+        if saved.not_before > now.saturating_add(MAX_RETRY_AFTER * 3 / 2) {
             saved.not_before = 0;
         }
         Self { saved, file: Some(file.to_path_buf()), ..Self::new() }
@@ -376,6 +376,16 @@ mod tests {
             assert_eq!(again.wait(NOW + 60), t.wait(NOW + 60), "jitter: {j}");
             assert!(again.throttled(NOW + 60));
         }
+    }
+
+    #[test]
+    fn a_saturated_clock_preserves_a_saved_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("feed-throttle.json");
+        let saved = Saved { not_before: i64::MAX, ..Saved::default() };
+        std::fs::write(&file, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let now = i64::MAX - 60;
+        assert_eq!(FeedThrottle::load(&file, now).wait(now), 60);
     }
 
     #[test]
