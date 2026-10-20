@@ -20,6 +20,9 @@
   <img alt="macOS · Windows · Linux · FreeBSD · Web" src="https://img.shields.io/badge/macOS%20%C2%B7%20Windows%20%C2%B7%20Linux%20%C2%B7%20FreeBSD%20%C2%B7%20Web-native-26282e?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
   <img alt="Status: early alpha" src="https://img.shields.io/badge/status-early%20alpha-d69e2e?style=flat-square">
+  <br>
+  <a href="https://sonarcloud.io/project/overview?id=storytold_craft-launcher"><img alt="Scanned by SonarCloud" src="https://img.shields.io/badge/Scanned_by-SonarCloud-4b9fd5?style=flat-square&logo=sonarqubecloud&logoColor=white"></a>
+  <a href="https://coderabbit.ai"><img alt="Reviewed by CodeRabbit" src="https://img.shields.io/coderabbit/prs/github/storytold/craft-launcher?style=flat-square&label=Reviewed%20by%20CodeRabbit&logo=coderabbit"></a>
 </p>
 
 <p align="center">
@@ -193,11 +196,28 @@ cargo run --release -p artcraft-launcher   # the desktop app
 cargo xtask ci                             # fmt, clippy, tests and the wasm check
 ```
 
-The web version builds with [trunk](https://trunkrs.dev/):
+The web version builds with [trunk](https://trunk-rs.github.io/trunk/):
 
 ```sh
 rustup target add wasm32-unknown-unknown
 cd apps/artcraft-launcher-web && trunk serve
+```
+
+### Nix (experimental)
+
+`flake.nix` gives a dev shell (`nix develop`, then the cargo commands above) and a package:
+
+```sh
+nix run github:storytold/craft-launcher
+```
+
+On NixOS this uses the system's graphics drivers. On other distros, a Nix-built program can't load
+the host's GPU drivers, so the window may fail to open. Run it through
+[nixGL](https://github.com/nix-community/nixGL) instead (NVIDIA needs nixGL's matching NVIDIA
+variant), or use the AppImage, `.deb` or `.rpm` release:
+
+```sh
+nix run --impure github:nix-community/nixGL -- nix run github:storytold/craft-launcher
 ```
 
 ### Installing your own builds
