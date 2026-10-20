@@ -101,6 +101,25 @@ struct Shared {
 }
 
 impl Shared {
+    fn store_latest(&self, app: &str, release: &Release) {
+        let mut latest = self.latest.lock().unwrap_or_else(PoisonError::into_inner);
+        if latest.get(app) != Some(release) {
+            latest.insert(app.to_string(), release.clone());
+            self.invalidate_download_size(app);
+        }
+    }
+
+    fn store_detected(&self, app: &str, found: Option<&Installed>) {
+        let mut installed = self.installed.lock().unwrap_or_else(PoisonError::into_inner);
+        if installed.get(app) != found {
+            match found {
+                Some(i) => installed.insert(app.to_string(), i.clone()),
+                None => installed.remove(app),
+            };
+            self.invalidate_download_size(app);
+        }
+    }
+
     fn invalidate_download_size(&self, app: &str) {
         self.download_sizes.lock().unwrap_or_else(PoisonError::into_inner).entry(app.to_string()).or_default().invalidate();
     }
@@ -196,8 +215,7 @@ impl NativeBackend {
             };
             if let Some((latest, from)) = answer {
                 if let LatestRelease::Found(r) = &latest {
-                    self.shared.latest.lock().unwrap_or_else(PoisonError::into_inner).insert(app.id.to_string(), r.clone());
-                    self.shared.invalidate_download_size(app.id);
+                    self.shared.store_latest(app.id, r);
                 }
                 self.shared.emit(Event::Latest { app: app.id.to_string(), latest, from });
             }
@@ -226,14 +244,7 @@ impl NativeBackend {
             let manifest = shared.manifest.lock().unwrap_or_else(PoisonError::into_inner).clone();
             for app in &SUITE {
                 let found = crate::detect::detect(app, &manifest, &snapshot);
-                {
-                    let mut map = shared.installed.lock().unwrap_or_else(PoisonError::into_inner);
-                    match &found {
-                        Some(i) => map.insert(app.id.to_string(), i.clone()),
-                        None => map.remove(app.id),
-                    };
-                }
-                shared.invalidate_download_size(app.id);
+                shared.store_detected(app.id, found.as_ref());
                 shared.emit(Event::Detected { app: app.id.to_string(), installed: found });
             }
             // Downloads paused (or cut off by quitting) in an earlier run.
@@ -312,8 +323,7 @@ impl NativeBackend {
                             }
                             let Some(latest) = latest else { continue };
                             if let LatestRelease::Found(r) = &latest {
-                                shared.latest.lock().unwrap_or_else(PoisonError::into_inner).insert(app.id.to_string(), r.clone());
-                                shared.invalidate_download_size(app.id);
+                                shared.store_latest(app.id, r);
                             }
                             if !matches!(latest, LatestRelease::Failed(_)) {
                                 shared.answered.lock().unwrap_or_else(PoisonError::into_inner).insert(app.id.to_string());
@@ -436,6 +446,7 @@ impl NativeBackend {
                     None => map.remove(app.id),
                 };
             }
+            // The manifest may change the package plan even when detection finds the same copy.
             shared.invalidate_download_size(app.id);
             shared.emit(Event::Detected { app: app.id.to_string(), installed: found });
             report_partial(app, &shared, &paths, platform);
@@ -1490,8 +1501,7 @@ mod tests {
         for asset in &mut latest.assets {
             asset.size = 300;
         }
-        backend.shared.latest.lock().unwrap().insert(APP.to_string(), latest);
-        backend.shared.invalidate_download_size(APP);
+        backend.shared.store_latest(APP, &latest);
         assert_eq!(backend.download_size(APP), None);
         ready(&mut backend);
         let fresh = backend.download_size(APP).unwrap();
@@ -1527,6 +1537,88 @@ mod tests {
         backend.shared.latest.lock().unwrap().insert(APP.to_string(), release("0.6.0"));
         backend.send(Command::Configure(BackendOptions::default()));
         assert_eq!(last_ready(backend.poll()), Some(false));
+    }
+
+    #[test]
+    fn an_unchanged_refresh_keeps_the_download_size_while_other_results_wait() {
+        struct Unchanged {
+            saving: mpsc::Sender<()>,
+            finish: Mutex<mpsc::Receiver<()>>,
+        }
+        impl ReleaseSource for Unchanged {
+            fn latest(&self, repo: &str, _prereleases: bool) -> Answer {
+                let latest = if CraftApp::by_id(APP).is_some_and(|app| app.repo == repo) {
+                    LatestRelease::Found(release("0.5.0"))
+                } else {
+                    LatestRelease::None
+                };
+                Answer { latest, source: Source::GitHubApi }
+            }
+            fn cached(&self, _repo: &str, _prereleases: bool) -> Option<LatestRelease> {
+                None
+            }
+            fn rate_limited_until(&self) -> Option<i64> {
+                None
+            }
+            fn save(&self) {
+                let _ = self.saving.send(());
+                // Disconnecting the sender also releases this gate if the test panics.
+                let _ = self.finish.lock().unwrap().recv();
+            }
+        }
+        let Some(platform) = native_platform() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let (saving, saved) = mpsc::channel();
+        let (finish, finished) = mpsc::channel();
+        let mut backend = backend(dir.path(), platform, Some(Arc::new(Unchanged { saving, finish: Mutex::new(finished) })));
+        backend.http = Some(Http::new().unwrap());
+        backend.shared.options.lock().unwrap().prereleases = true;
+        ready(&mut backend);
+        let before = backend.download_size(APP);
+        assert!(before.is_some());
+        let (wake, waking) = mpsc::channel();
+        Arc::get_mut(&mut backend.shared).unwrap().waker = Arc::new(move || {
+            let _ = wake.send(());
+        });
+
+        backend.send(Command::CheckForUpdates { force: true });
+        saved.recv_timeout(Duration::from_secs(20)).unwrap();
+        // Latest was delivered, but the batch's final report_partial loop cannot run yet.
+        let during = backend.download_size(APP);
+        let pending = backend.poll();
+        drop(finish);
+        let mut complete = false;
+        while !complete {
+            waking.recv_timeout(Duration::from_secs(20)).unwrap();
+            complete = backend.poll().iter().any(|event| matches!(event, Event::CheckFinished { .. }));
+        }
+        assert!(pending.iter().any(|event| matches!(event, Event::Latest { app, latest: LatestRelease::Found(_), .. } if app == APP)));
+        assert!(!pending.iter().any(|event| matches!(event, Event::CheckFinished { .. })));
+        assert_eq!(during, before, "an identical release must keep its known size throughout Refresh");
+    }
+
+    #[test]
+    fn unchanged_detection_keeps_the_plan_but_a_changed_copy_rejects_old_reports() {
+        let Some(platform) = native_platform() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = backend(dir.path(), platform, None);
+        ready(&mut backend);
+        let plan = backend.download_size(APP);
+        let revision = backend.shared.download_revision(APP);
+        backend.shared.store_detected(APP, None);
+        assert_eq!(backend.download_size(APP), plan);
+
+        backend.shared.store_detected(APP, Some(&copy("0.4.0")));
+        assert_eq!(backend.download_size(APP), None);
+        assert!(!backend.shared.report_download(APP, revision, plan, None, false));
+        let revision = backend.shared.download_revision(APP);
+        assert!(backend.shared.report_download(APP, revision, plan, None, false));
+        backend.shared.store_detected(APP, Some(&copy("0.4.0")));
+        assert_eq!(backend.download_size(APP), plan);
+
+        backend.shared.store_detected(APP, Some(&copy("0.5.0")));
+        assert_eq!(backend.download_size(APP), None);
+        assert!(!backend.shared.report_download(APP, revision, plan, None, false));
     }
 
     #[test]
